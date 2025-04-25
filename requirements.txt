@@ -1,0 +1,8 @@
+apache-airflow
+pandas
+pyspark
+kafka-python
+minio
+elasticsearch
+requests
+flask
