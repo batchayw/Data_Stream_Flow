@@ -1,0 +1,42 @@
+openapi: 3.1.3
+info:
+  title: Data Pipeline API
+  description: API to trigger the data processing pipeline manually.
+  version: 1.0.0
+servers:
+  - url: http://localhost:5000
+    description: Local server
+paths:
+  /trigger-pipeline:
+    post:
+      summary: Trigger the data pipeline
+      description: Manually triggers the Airflow data pipeline to start processing.
+      responses:
+        '200':
+          description: Pipeline triggered successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  message:
+                    type: string
+                    example: |
+                      Pipeline triggered successfully.
+        '500':
+          description: Failed to trigger pipeline
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: error
+                  message:
+                    type: string
+                    example: |
+                      Failed to trigger pipeline: error message
