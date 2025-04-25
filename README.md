@@ -56,3 +56,18 @@
 ***15. Configurez des alertes pour détecter les anomalies (via Airflow)***
 - Configurez des alertes dans Airflow pour signaler les échecs ou anomalies (envoi d’un e-mail ou notification Slack).
 
+
+#### Note
+Si vous vous tester API depuis la pipeline, ajouter ce job dans `ci-cd.yml`:
+```yaml
+# Step: Test the API endpoint
+      - name: Test API endpoint
+        run: |
+          # Wait for the API to be ready
+          sleep 10
+          # Send a POST request to the API
+          curl -X POST http://localhost:5000/trigger-pipeline
+```
+
+## Auteur 
+- William BATCHAYON (@batchayw)
