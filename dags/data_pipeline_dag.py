@@ -5,7 +5,7 @@ import os
 import sys
 
 # Add the scripts directory to PYTHONPATH
-sys.path.append(os.path.abspath("/scripts"))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "/scripts")))
 
 from load_remote_csv import load_remote_csv
 from process_with_pandas_and_spark import process_with_pandas_and_spark
@@ -29,7 +29,7 @@ default_args = {
 
 # Define the DAG
 with DAG(
-    'data_pipeline_dag',
+    dag_id='data_pipeline_dag',
     default_args=default_args,
     description='A data processing pipeline orchestrated by Airflow',
     schedule_interval='@hourly',  # Run every hour
