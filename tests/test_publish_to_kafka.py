@@ -1,7 +1,7 @@
 import unittest
 import json
 import os
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 from scripts.publish_to_kafka import publish_to_kafka
 
 class TestPublishToKafka(unittest.TestCase):
@@ -14,16 +14,18 @@ class TestPublishToKafka(unittest.TestCase):
             {"original_column": "value1", "generated_value": "value1_generated"},
             {"original_column": "value2", "generated_value": "value2_generated"}
         ]
+        os.makedirs("/tmp", exist_ok=True)
         with open("/tmp/generated_data.json", "w") as f:
             json.dump(sample_data, f)
 
-    @patch('kafka.KafkaProducer')  # Mock the KafkaProducer to avoid connecting to a real Kafka instance
+    @patch('scripts.publish_to_kafka.KafkaProducer', autospec=True)  # Patch the KafkaProducer class in the correct module
     def test_publish_to_kafka(self, mock_producer):
         """
         Test the publish_to_kafka function to ensure it publishes data to Kafka.
         """
         # Create a mock producer instance
-        mock_producer_instance = mock_producer.return_value
+        mock_producer_instance = MagicMock()
+        mock_producer.return_value = mock_producer_instance
         
         # Run the function
         publish_to_kafka()
@@ -31,7 +33,7 @@ class TestPublishToKafka(unittest.TestCase):
         # Verify that the producer was initialized with the correct bootstrap servers
         mock_producer.assert_called_once_with(
             bootstrap_servers=['kafka:9092'],
-            value_serializer=mock_producer.call_args[1]['value_serializer']
+            value_serializer=mock_producer.call_args.kwargs['value_serializer']
         )
         
         # Verify that send was called for each record
