@@ -15,7 +15,7 @@ class TestIndexToElasticsearch(unittest.TestCase):
         with open("/tmp/kafka_output/test.json", "w") as f:
             json.dump(sample_data, f)
 
-    @patch('elasticsearch.Elasticsearch')  # Mock the Elasticsearch client
+    @patch('scripts.index_to_elasticsearch.Elasticsearch')  # Patch Elasticsearch in the correct module
     def test_index_to_elasticsearch(self, mock_es):
         """
         Test the index_to_elasticsearch function to ensure it indexes data correctly.
