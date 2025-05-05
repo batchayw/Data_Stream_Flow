@@ -13,7 +13,7 @@ class TestStoreToMinIO(unittest.TestCase):
         with open("/tmp/kafka_output/test.json", "w") as f:
             f.write('{"key": "value"}')
 
-    @patch('minio.Minio')  # Mock the MinIO client
+    @patch('scripts.store_to_minio.Minio')  # Patch Minio in the correct module
     def test_store_to_minio(self, mock_minio):
         """
         Test the store_to_minio function to ensure it uploads files to MinIO.
