@@ -1,0 +1,285 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    - cron: '0 * * * *'  # Run every hour
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Clone the repository
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # Step 2: Set up Docker
+      - name: Set up Docker
+        uses: docker/setup-buildx-action@v2
+
+      # Step 3: Install Docker Compose
+      - name: Install Docker Compose
+        run: |
+          sudo curl -L "https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+          sudo chmod +x /usr/local/bin/docker-compose
+
+      # Step 4: Install Java for Spark
+      - name: Install Java
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openjdk-11-jdk
+          java -version
+
+      # Step 5: Set up Python and install dependencies
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.8'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Step 6: Start services with Docker Compose
+      - name: Start services
+        run: |
+          docker-compose up -d
+          echo "Waiting for Kafka to be healthy..."
+          for i in {1..12}; do  # Retry for 2 minutes (12 * 10s)
+            if docker inspect kafka --format='{{.State.Health.Status}}' | grep -q "healthy"; then
+              echo "Kafka is healthy!"
+              break
+            fi
+            echo "Kafka not healthy yet, waiting 10 seconds..."
+            sleep 10
+          done
+          docker inspect kafka --format='{{.State.Health.Status}}' | grep -q "healthy" || (echo "Kafka failed to become healthy" && exit 1)
+          echo "Waiting for Airflow to be healthy..."
+          for i in {1..18}; do  # Retry for 3 minutes (18 * 10s)
+            if docker inspect airflow --format='{{.State.Health.Status}}' | grep -q "healthy"; then
+              echo "Airflow is healthy!"
+              break
+            fi
+            echo "Airflow not healthy yet, waiting 10 seconds..."
+            sleep 10
+          done
+          docker inspect airflow --format='{{.State.Health.Status}}' | grep -q "healthy" || (echo "Airflow failed to become healthy" && exit 1)
+
+      # Step 6.1: Debug container status
+      - name: Debug container status
+        run: |
+          docker ps -a
+          docker logs kafka || echo "Kafka container not found"
+          docker logs airflow || echo "Airflow container not found"
+
+      # Step 7: Create Kafka topic
+      - name: Create Kafka topic
+        run: |
+          if docker exec kafka /usr/bin/kafka-topics --list --bootstrap-server kafka:9092 | grep -q data_topic; then
+            echo "Topic 'data_topic' already exists."
+          else
+            for i in {1..5}; do
+              docker exec kafka /usr/bin/kafka-topics --create --topic data_topic --bootstrap-server kafka:9092 --partitions 1 --replication-factor 1 && break
+              echo "Kafka not ready, retrying ($i/5)..."
+              sleep 10
+            done || echo "Failed to create topic"
+          fi
+
+      # Step 8: Run unit tests
+      - name: Run unit tests
+        run: |
+          mkdir -p /tmp
+          python -m unittest discover -s tests -p "test_*.py"
+
+      # Step 9: Run unit tests
+      - name: Validate DAGs
+        run: |
+          docker exec airflow airflow dags show data_pipeline_dag || (echo "DAG invalide ou non chargé" && exit 1)
+
+      # Step 9.1: Test the pipeline by triggering the DAG
+      - name: Test pipeline
+        run: |
+          AIRFLOW_CONTAINER=$(docker ps -q -f "name=airflow")
+          if [ -z "$AIRFLOW_CONTAINER" ]; then
+            echo "Error: Airflow container not found!"
+            exit 1
+          fi
+          AIRFLOW_CONTAINER_NAME=$(docker inspect --format '{{.Name}}' $AIRFLOW_CONTAINER | sed 's/^\///')
+          # Clean up the /opt/airflow/dags directory to remove any duplicates
+          docker exec $AIRFLOW_CONTAINER_NAME rm -rf /opt/airflow/dags/*
+          # Copy the contents of the scripts/ directory directly to /scripts
+          docker cp scripts/. $AIRFLOW_CONTAINER_NAME:/scripts
+          # Copy the contents of the dags/ directory directly to /opt/airflow/dags
+          docker cp dags/. $AIRFLOW_CONTAINER_NAME:/opt/airflow/dags
+
+          # Debug: List the contents of the scripts and dags directories
+          docker exec $AIRFLOW_CONTAINER_NAME ls -la /scripts
+          docker exec $AIRFLOW_CONTAINER_NAME ls -la /opt/airflow/dags
+
+          # Debug: Verify that dependencies are installed
+          # Run as the airflow user and set PATH to include /home/airflow/.local/bin
+          docker exec -u airflow $AIRFLOW_CONTAINER_NAME bash -c "PATH=$PATH:/home/airflow/.local/bin pip list"
+
+          # Debug: Check Python path and script availability
+          docker exec $AIRFLOW_CONTAINER_NAME python -c "import sys; print(sys.path)"
+          docker exec $AIRFLOW_CONTAINER_NAME python -c "import sys; sys.path.append('/scripts'); import load_remote_csv; print('Successfully imported load_remote_csv')"
+
+          # Debug: Manually parse the DAG file to check for errors
+          docker exec $AIRFLOW_CONTAINER_NAME python /opt/airflow/dags/data_pipeline_dag.py
+
+          echo "Waiting for Airflow to load DAGs..."
+          for i in {1..36}; do  # Retry for 6 minutes (36 * 10s)
+            # Force Airflow to rescan the DAGs directory
+            docker exec $AIRFLOW_CONTAINER_NAME airflow dags reserialize
+            docker exec $AIRFLOW_CONTAINER_NAME airflow dags list | grep -q "data_pipeline_dag" && break
+            echo "DAG not found yet, waiting 10 seconds... (Attempt $i of 36)"
+            docker exec $AIRFLOW_CONTAINER_NAME airflow dags list
+            echo "Checking for import errors..."
+            docker exec $AIRFLOW_CONTAINER_NAME airflow dags list-import-errors
+            sleep 10
+          done
+
+          docker exec $AIRFLOW_CONTAINER_NAME airflow dags list | grep -q "data_pipeline_dag" || (echo "DAG not loaded after 6 minutes!" && exit 1)
+
+          echo "Triggering the DAG..."
+          docker exec $AIRFLOW_CONTAINER_NAME airflow dags trigger -r test-run data_pipeline_dag
+      
+      # Step 9.2: Debug Elasticsearch Status
+      - name: Debug Elasticsearch Status
+        run: |
+          echo "Checking Elasticsearch status..."
+          docker inspect elasticsearch --format='{{.State.Health.Status}}' | grep -q "healthy" || (echo "Elasticsearch is not healthy!" && docker logs elasticsearch && exit 1)
+          curl -s http://localhost:9200 || (echo "Failed to connect to Elasticsearch!" && exit 1)
+          curl -s http://localhost:9200/_cat/indices?v || echo "No indices found yet."
+
+      # Step 9.3: Wait for DAG to complete
+      - name: Wait for DAG completion
+        run: |
+          echo "Waiting for DAG run to complete..."
+
+          # Display all DAG runs for debugging purposes
+          docker exec airflow airflow dags list-runs -d data_pipeline_dag
+
+          # Extract the line containing "test-run"
+          LINE=$(docker exec airflow airflow dags list-runs -d data_pipeline_dag | grep 'test-run')
+
+          # Extract the 4th column (execution_date) while trimming whitespace
+          EXECUTION_DATE=$(echo "$LINE" | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/, "", $4); print $4}')
+
+          echo "Execution date for 'test-run': $EXECUTION_DATE"
+
+          if [ -z "$EXECUTION_DATE" ]; then
+            echo "Error: execution_date not found for run_id 'test-run'"
+            exit 1
+          fi
+
+          for i in {1..10}; do
+            STATUS=$(docker exec airflow airflow dags state data_pipeline_dag "$EXECUTION_DATE")
+            echo "Current DAG run state: $STATUS"
+            if [[ "$STATUS" == *"success"* ]] || [[ "$STATUS" == *"failed"* ]]; then
+              break
+            fi
+            sleep 10
+          done
+
+      # Step 10: Verify data in Elasticsearch
+      - name: Verify Elasticsearch data
+        run: |
+          echo "Waiting for data in Elasticsearch..."
+          for i in {1..12}; do  # Increased to 2 minutes (12 attempts * 10s)
+            # Check all indices (excluding system indices starting with '.')
+            if curl -s http://localhost:9200/_cat/indices?v | grep -v '^\.'; then
+              echo "Data found in Elasticsearch."
+              curl -s http://localhost:9200/_cat/indices?v
+              exit 0
+            fi
+            echo "No data yet, waiting 10s... (attempt $i of 12)"
+            sleep 10
+          done
+          echo "Error: No data found in Elasticsearch after waiting."
+          exit 1
+
+      # Step 11: Collect and analyze logs for performance monitoring
+      - name: Check logs
+        run: |
+          echo "Airflow logs:"
+          docker logs airflow
+          echo "Kafka logs:"
+          docker logs kafka
+          echo "Spark logs:"
+          docker exec airflow find /opt/airflow -name "*.log" -exec cat {} \;
+
+      # Step 12: Analyze Airflow performance
+      - name: Analyze Airflow performance
+        run: |
+          echo "Listing DAG tasks..."
+          docker exec airflow airflow tasks list data_pipeline_dag --tree
+
+          echo "Searching for task logs with durations..."
+          if docker exec airflow test -d /opt/airflow/logs/data_pipeline_dag; then
+            LOG_FILES=$(docker exec airflow find /opt/airflow/logs/data_pipeline_dag -type f -name "*.log")
+            
+            if [ -z "$LOG_FILES" ]; then
+              echo "No log files found."
+            else
+              for FILE in $LOG_FILES; do
+                echo "Inspecting $FILE"
+                docker exec airflow cat "$FILE" | grep "Duration" && echo "---"
+              done
+            fi
+          else
+            echo "Log directory not found. DAG may not have started or logging is misconfigured."
+          fi
+
+      # Step 13: Detect anomalies in Airflow logs
+      - name: Detect anomalies in Airflow logs
+        run: |
+          echo "Analyzing logs for anomalies (duration > 600s)..."
+          if docker exec airflow test -d /opt/airflow/logs/data_pipeline_dag; then
+            LOG_FILES=$(docker exec airflow find /opt/airflow/logs/data_pipeline_dag -type f -name "*.log")
+
+            if [ -z "$LOG_FILES" ]; then
+              echo "No log files found. Skipping anomaly detection."
+            else
+              for FILE in $LOG_FILES; do
+                DURATION_LINE=$(docker exec airflow cat "$FILE" | grep -E "Duration: [0-9]+")
+                if echo "$DURATION_LINE" | grep -qE "Duration: [6-9][0-9]{2,}|[1-9][0-9]{3,}"; then
+                  echo "Anomaly detected in $FILE: $DURATION_LINE"
+                  exit 1
+                fi
+              done
+              echo "No anomalies detected."
+            fi
+          else
+            echo "Log directory not found. DAG may not have run yet."
+          fi
+
+      # Step 13.1: Debug Slack Webhook
+      - name: Debug Slack Webhook
+        if: failure()
+        run: |
+          echo "Sending test message to Slack via Webhook..."
+          curl -X POST -H 'Content-type: application/json' \
+            --data '{"text":"Test message from GitHub Actions (Debug)"}' \
+            '${{ secrets.SLACK_BOT_TOKEN }}'
+
+      # Step 14: Notify Slack on failure
+      - name: Notify Slack on failure
+        if: failure()
+        run: |
+          echo "Notifying Slack about pipeline failure..."
+          curl -X POST -H 'Content-type: application/json' \
+            --data '{"text":"Pipeline failed! Check the logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' \
+            '${{ secrets.SLACK_BOT_TOKEN }}'
+
+      # Step 15: Stop services
+      - name: Stop services
+        run: |
+          docker-compose down
