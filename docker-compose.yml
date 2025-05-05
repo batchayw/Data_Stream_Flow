@@ -3,6 +3,7 @@ version: '3.8'
 services:
   zookeeper:
     image: confluentinc/cp-zookeeper:latest
+    container_name: zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
@@ -11,6 +12,7 @@ services:
 
   kafka:
     image: confluentinc/cp-kafka:latest
+    container_name: kafka
     depends_on:
       - zookeeper
     environment:
@@ -23,9 +25,15 @@ services:
     ports:
       - "9092:9092"
       - "29092:29092"
+    healthcheck:
+      test: ["CMD", "kafka-topics.sh", "--list", "--bootstrap-server", "kafka:9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   minio:
     image: minio/minio
+    container_name: minio
     ports:
       - "9000:9000"
     environment:
@@ -34,40 +42,84 @@ services:
     command: server /data
 
   elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.0
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.9
+    container_name: elasticsearch
     environment:
       - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
     ports:
       - "9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200 | grep -q 'You Know, for Search'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
 
   kibana:
     image: docker.elastic.co/kibana/kibana:7.17.0
+    container_name: kibana
     ports:
       - "5601:5601"
     depends_on:
       - elasticsearch
 
+  postgres:
+    image: postgres:13
+    container_name: postgres
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s  
+      timeout: 5s
+      retries: 10   
+      start_period: 10s  
+
   airflow:
     image: apache/airflow:2.5.1
+    container_name: airflow
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
-      - AIRFLOW__CORE__EXECUTOR=LocalExecutor 
-      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=sqlite:////airflow/airflow.db
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_PRE_PING=True
       - AIRFLOW__SMTP__SMTP_HOST=smtp.gmail.com
       - AIRFLOW__SMTP__SMTP_PORT=587
       - AIRFLOW__SMTP__SMTP_USER=mysol.c.t@gmail.com
-      - AIRFLOW__SMTP__SMTP_PASSWORD=***********  # Put you're email password 
+      - AIRFLOW__SMTP__SMTP_PASSWORD=123456789  # Replace with your email password or app-specific password
       - AIRFLOW__SMTP__SMTP_MAIL_FROM=mysol.c.t@gmail.com
+      - AIRFLOW__CORE__DAG_DIR_LIST_INTERVAL=10 
+      - SQLALCHEMY_SILENCE_UBER_WARNING=1  
     volumes:
       - ./dags:/opt/airflow/dags
       - ./scripts:/scripts
-      - ./airflow:/airflow
+      - ./requirements.txt:/opt/airflow/requirements.txt
     ports:
       - "8080:8080"
     command: >
-      bash -c "airflow db init && airflow users create --username admin --firstname Admin --lastname User --role Admin --email admin@example.com --password admin && airflow webserver & airflow scheduler"
+      bash -c "pip install -r /opt/airflow/requirements.txt &&
+           airflow db init &&
+           airflow users create --username admin --firstname Admin --lastname User --role Admin --email admin@example.com --password admin &&
+           airflow webserver"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s 
 
   api:
     image: python:3.8-slim
+    container_name: api
     volumes:
       - ./scripts:/app
     working_dir: /app
@@ -75,3 +127,6 @@ services:
       bash -c "pip install flask && python api.py"
     ports:
       - "5000:5000"
+
+volumes:
+  postgres_data:
