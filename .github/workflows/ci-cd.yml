@@ -8,7 +8,7 @@ on:
     branches:
       - main
   schedule:
-    - cron: '0 * * * *'  # Run every hour
+    - cron: '0 0 1 * *'  # Run every hour
 
 jobs:
   build-and-test:
